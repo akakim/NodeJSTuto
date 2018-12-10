@@ -1,4 +1,4 @@
-'use strict'
+'use strict';
 
 
 const functions         = require('firebase-functions');
@@ -7,14 +7,14 @@ const admin             = require('firebase-admin');
 admin.initializeApp();
 
 const express           = require('express');
-const cookieParser      = require('cookie-parser')();
-const cors              = require('cors')({origin: true});
-const app               = express();
+//const cookieParser      = require('cookie-parser')();
+//const cors              = require('cors')({origin: true});
+//const app               = express();
 
 // google authenticated json api
 
 const language              = require('@google-cloud/language');
-const client                = language.LanguageServiceClient();
+const client                = new language.LanguageServiceClient();
 const testApp               = express();
 
 // Create and Deploy Your First Cloud Functions
@@ -112,18 +112,25 @@ const validateFirebaseIdToken = (req, res, next ) => {
        return;
    }
 
-   let idToken;
+    let idToken = req.headers.authorization.split( 'Bearer ')[1];
    if( req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
 
-       console.log(' find "Authorization  " header')
+       //console.log(' find "Authorization  " header')
+
 
        // read id Token from the authorization header
        idToken = req.headers.authorization.split('Bearer ')[1];
 
-   }else if (req.cookies) {
-       console.log('Found "session " cookies "')
-       idToken = req.cookies.__session;
-   }else {
+       admin.auth().verifyIdToken(idToken).then(( decodedIdToken) => {
+           req.user = decodedIdToken;
+           console.log('Found "session " cookies "');
+
+           idToken = req.cookies.__session;
+           return next();
+       }).catch( () => {
+           res.status(403).send('Unauthorized');
+       });
+   } else {
        res.status(403).send('unauthorized');
        return;
    }
@@ -140,19 +147,71 @@ const validateFirebaseIdToken = (req, res, next ) => {
 };
 
 
-app.use(cors);
-app.use(cookieParser);
-app.use(validateFirebaseIdToken);
-app.get('/firestHello', (req,res ) => {
-   res.send( 'Hello ${req.user.name}');
+// POST /api/messages
+// Create a new messgae, get its sentiment using google cloud NLP
+// and categorize the sentiment before saving
+testApp.post('/messages', (req,res) => {
+
+    const message = req.body.message;
+
+    client.analyzeSentiment({document:message} ).then((results) =>{
+
+       const category = categorizeScore( results[0].docuemntSentiment.score);
+       const data = {message: message, sentiment: results, category: category };
+       return admin.database().ref('/users/${req.user.uid}/messages').push(data);
+     }).then((snapshot) =>{
+       return snapshot.ref.once('value')
+
+     }).then((snapshot)=>{
+        const val = snapshot.val();
+        return res.status(201).json({message: val.message,category: val.category});
+
+    }).catch((error) =>{
+       console.log('Error detecting sentiment or saving message ',error.message);
+    });
 });
 
+//app.use(cors);
+//app.use(cookieParser);
 
+testApp.use(validateFirebaseIdToken);
+
+//app.get('/firestHello', (req,res ) => {
+//   res.send( 'Hello ${req.user.name}');
+//});
+
+// GET /api/message?category={category}
+// Get all messages, optionally specifying a category to filter on
+testApp.get('/messages', (req, res) => {
+    const category = req.query.category;
+    let query = admin.database().ref(`/users/${req.user.uid}/messages`);
+
+    if (category && ['positive', 'negative', 'neutral'].indexOf(category) > -1) {
+        // Update the query with the valid category
+        query = query.orderByChild('category').equalTo(category);
+    } else if (category) {
+        return res.status(404).json({errorCode: 404, errorMessage: `category '${category}' not found`});
+    }
+
+    return query.once('value').then((snapshot) => {
+        let messages = [];
+        snapshot.forEach((childSnapshot) => {
+            messages.push({key: childSnapshot.key, message: childSnapshot.val().message});
+        });
+
+        return res.status(200).json(messages);
+    }).catch((error) => {
+        console.log('Error getting messages', error.message);
+        res.sendStatus(500);
+    });
+});
+
+exports.api = functions.https.onRequest( testApp );
 
 //This Https endpoint can only be accessed by your Firebase users
 
 
-exports.app = functions.https.onRequest( app );
+//exports.app = functions.https.onRequest( app );
 
 
 // authenticate
@@ -177,7 +236,7 @@ const authenticate = (req, res, next) => {
     }).catch(() => {
         res.status(403).send('Unauthorized');
     });
-}
+};
 
 testApp.use(authenticate);
 
@@ -244,20 +303,33 @@ testApp.get('/message/:messageId', (req, res) => {
         res.sendStatus(500);
     });
 });
-testApp.get('/message/:messageId',(req,res) =>{
 
 
-    }
-)
+// get detail about a message
+testApp.get('/message/:messageId',(req,res) => {
+
+    const messageId = req.params.messageId;
+    admin.database().ref(`/users/${req.user.uid}/messages/${messageId}`).once('value').then((snapshot) => {
+        if (snapshot.val() === null) {
+            return res.status(404).json({errorCode: 404, errorMessage: `message '${messageId}' not found`});
+        }
+        return res.set('Cache-Control', 'private, max-age=300');
+    }).catch((error) => {
+        console.log('Error getting message details', messageId, error.message);
+        res.sendStatus(500);
+    });
+});
+
+
 // Expose the API as a function
 exports.api = functions.https.onRequest(testApp);
 
 // Helper function to categorize a sentiment score as positive, negative, or neutral
-const categorizeScore = (score) => {
-    if (score > 0.25) {
-        return 'positive';
-    } else if (score < -0.25) {
-        return 'negative';
-    }
-    return 'neutral';
-};
+    const categorizeScore = (score) => {
+        if (score > 0.25) {
+            return 'positive';
+        } else if (score < -0.25) {
+            return 'negative';
+        }
+        return 'neutral';
+    };
