@@ -325,11 +325,14 @@ testApp.get('/message/:messageId',(req,res) => {
 exports.api = functions.https.onRequest(testApp);
 
 // Helper function to categorize a sentiment score as positive, negative, or neutral
-    const categorizeScore = (score) => {
-        if (score > 0.25) {
-            return 'positive';
-        } else if (score < -0.25) {
-            return 'negative';
-        }
-        return 'neutral';
-    };
+const categorizeScore = (score) => {
+    if (score > 0.25) {
+        return 'positive';
+    } else if (score < -0.25) {
+        return 'negative';
+    }
+    return 'neutral';
+};
+
+var http = require('http') ,
+    https = require('https');
